@@ -226,11 +226,13 @@ func utcStamp() -> String {
     ISO8601DateFormatter.string(from: Date(), timeZone: TimeZone(identifier: "UTC")!, formatOptions: [.withInternetDateTime, .withFractionalSeconds])
 }
 
-/// Son durumu tek satır olarak yazar (tanı için; yüzde dışında veri yok).
+/// Son 30 durumu satır satır tutar (tanı için; yüzde dışında veri yok).
 func writeLog(_ line: String) {
     let url = dataURL.deletingLastPathComponent().appendingPathComponent("kullanim-tarayici.log")
     try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try? (utcStamp() + " " + String(line.prefix(900)) + "\n").write(to: url, atomically: true, encoding: .utf8)
+    let previous = (try? String(contentsOf: url, encoding: .utf8))?.split(separator: "\n").suffix(29).map(String.init) ?? []
+    let lines = previous + [utcStamp() + " " + String(line.prefix(900))]
+    try? (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
 }
 
 /// Yalnız yüzde ve sıfırlanma zamanı kabul eder, dosyaya yazar.
