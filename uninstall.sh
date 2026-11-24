@@ -7,4 +7,6 @@ pkill -x Kullanim 2>/dev/null
 rm -rf "$APP" "$HOME/Applications/Kullanim Chrome"
 rm -f "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/local.kullanim.json"
 rm -f "$HOME/.claude/kullanim.json" "$HOME/.claude/kullanim-tarayici.log"
+rm -rf "$HOME/Library/WebKit/local.kullanim.gosterge" "$HOME/Library/HTTPStorages/local.kullanim.gosterge" "$HOME/Library/Caches/local.kullanim.gosterge"
+defaults delete local.kullanim.gosterge >/dev/null 2>&1
 echo "Kullanım removed. In Chrome, remove the \"Kullanım göstergesi\" extension at chrome://extensions."

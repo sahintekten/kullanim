@@ -1,9 +1,11 @@
 // Kullanım: Claude plan kullanım yüzdesini menü çubuğunda sürekli gösterir.
-// Veriyi ~/.claude/kullanim.json dosyasından okur; o dosyayı "kullanim" modu yazar.
-// Ağa çıkmaz, giriş bilgisine dokunmaz.
+// Veriyi ~/.claude/kullanim.json dosyasından okur. O dosyayı yazanlar: Claude Code modu ("kullanim"),
+// Chrome eklentisi (yerel bağlantı) ya da uygulamanın kendi claude.ai bağlantısı (bir kez giriş yapılan
+// pencere; oturum yalnız bu Mac'te, uygulamanın WebKit deposunda durur, yalnız claude.ai ile konuşur).
 
 import Cocoa
 import ServiceManagement
+import WebKit
 
 let isTurkish = (Locale.preferredLanguages.first ?? "en").hasPrefix("tr")
 func L(_ tr: String, _ en: String) -> String { isTurkish ? tr : en }
@@ -218,6 +220,224 @@ final class PanelView: NSView {
     }
 }
 
+// MARK: - Okumayı kaydetme (eklenti ve claude.ai bağlantısı ortak)
+
+func utcStamp() -> String {
+    ISO8601DateFormatter.string(from: Date(), timeZone: TimeZone(identifier: "UTC")!, formatOptions: [.withInternetDateTime, .withFractionalSeconds])
+}
+
+/// Son durumu tek satır olarak yazar (tanı için; yüzde dışında veri yok).
+func writeLog(_ line: String) {
+    let url = dataURL.deletingLastPathComponent().appendingPathComponent("kullanim-tarayici.log")
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try? (utcStamp() + " " + String(line.prefix(900)) + "\n").write(to: url, atomically: true, encoding: .utf8)
+}
+
+/// Yalnız yüzde ve sıfırlanma zamanı kabul eder, dosyaya yazar.
+@discardableResult
+func saveReading(_ list: [[String: Any]], source: String, note: String? = nil) -> Bool {
+    let clean: [[String: Any]] = list.compactMap { entry in
+        guard let kind = entry["kind"] as? String, kind.count < 40,
+              let percent = (entry["percentUsed"] as? NSNumber)?.doubleValue, percent >= 0, percent <= 1000 else { return nil }
+        var row: [String: Any] = ["kind": kind, "percentUsed": percent]
+        if let reset = entry["resetsAt"] as? String, reset.count < 40 { row["resetsAt"] = reset }
+        return row
+    }
+    guard !clean.isEmpty,
+          let data = try? JSONSerialization.data(withJSONObject: ["updatedAt": utcStamp(), "source": source, "rateLimits": clean], options: [.prettyPrinted])
+    else { return false }
+    try? FileManager.default.createDirectory(at: dataURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try? data.write(to: dataURL, options: .atomic)
+    writeLog(source + " tamam: " + clean.compactMap { $0["kind"] as? String }.joined(separator: ",")
+             + (note.map { " | iskelet: " + String($0.prefix(600)) } ?? ""))
+    return true
+}
+
+// MARK: - claude.ai bağlantısı (Safari ya da başka tarayıcı kullananlar için)
+
+/// claude.ai'nin kendi kullanım sayfasının okuduğu veriyi okur (Chrome eklentisindeki ayrıştırıcının aynısı).
+let usageScript = """
+const getJSON = async (u) => {
+  const r = await fetch(u, { credentials: 'include', headers: { accept: 'application/json' } })
+  if (!r.ok) throw new Error(u.replace(/[0-9a-f-]{36}/, '<org>') + ' -> ' + r.status)
+  return r.json()
+}
+const ORDER = k => (k === 'seven_day' ? 0 : k.startsWith('seven_day_') ? 1 : 2)
+const shapeOf = (node, depth) => {
+  if (node === null) return 'null'
+  if (typeof node !== 'object') return typeof node === 'number' ? 'n' : typeof node === 'string' ? 's' : typeof node
+  if (depth > 3) return '...'
+  if (Array.isArray(node)) return '[' + (node.length ? shapeOf(node[0], depth + 1) : '') + ']'
+  return '{' + Object.entries(node).filter(([, v]) => v !== null).map(([k, v]) => k + ':' + shapeOf(v, depth + 1)).join(',') + '}'
+}
+const orgs = await getJSON('https://claude.ai/api/organizations')
+if (!Array.isArray(orgs) || orgs.length === 0) throw new Error('no organizations')
+const paid = orgs.find(o => (o.capabilities || []).some(c => /max|pro|ultra|team|enterprise/i.test(c)))
+const org = paid || orgs[0]
+const data = await getJSON('https://claude.ai/api/organizations/' + org.uuid + '/usage')
+const rateLimits = []
+const skip = new Set(['limits', 'windows', 'models', 'model', 'by', 'by_model', 'usage', 'rate', 'rate_limits', 'weekly', 'per'])
+const walk = (node, path, depth) => {
+  if (!node || typeof node !== 'object' || depth > 4) return
+  for (const [key, v] of Object.entries(node)) {
+    if (!v || typeof v !== 'object') continue
+    const u = typeof v.utilization === 'number' ? v.utilization : typeof v.percent_used === 'number' ? v.percent_used : null
+    const segs = [...path, String(v.model || v.model_name || v.name || key)].map(x => x.toLowerCase().replace(/[^a-z0-9_]+/g, '_'))
+    if (u === null) { walk(v, Array.isArray(node) ? path : [...path, key], depth + 1); continue }
+    const flat = segs.join('_')
+    let kind
+    if (flat === 'seven_day' || flat === 'five_hour') kind = flat
+    else if (flat.includes('five_hour')) kind = 'five_hour_' + segs.filter(x => x !== 'five_hour' && !skip.has(x)).join('_')
+    else {
+      const extra = segs.flatMap(x => x.replace(/^seven_day_?/, '').split('_')).filter(x => x && !skip.has(x) && x !== 'seven' && x !== 'day')
+      kind = extra.length ? 'seven_day_' + extra.join('_') : 'seven_day'
+    }
+    rateLimits.push({ kind, percentUsed: Math.round(u * 10) / 10, resetsAt: v.resets_at || v.resetsAt || undefined })
+  }
+}
+// Asıl kaynak: "limits" listesi (haftalık toplam ve model bazlı sınırlar, ör. scope.model.display_name = "Fable").
+for (const l of (Array.isArray(data.limits) ? data.limits : [])) {
+  if (!l || typeof l.percent !== 'number') continue
+  const g = String(l.group || l.kind || '').toLowerCase()
+  const base = g.includes('week') ? 'seven_day' : /session|five|hour/.test(g) ? 'five_hour' : null
+  if (!base) continue
+  const scope = l.scope || {}
+  const name = (scope.model && (scope.model.display_name || scope.model.id)) || (scope.surface && (scope.surface.display_name || scope.surface.id || (typeof scope.surface === 'string' ? scope.surface : '')))
+  let kind = base
+  if (name) kind = base + '_' + String(name).toLowerCase().replace(/[^a-z0-9]+/g, '_')
+  else if (String(l.kind || '').includes('scoped')) kind = base + '_scoped'
+  rateLimits.push({ kind, percentUsed: Math.round(l.percent * 10) / 10, resetsAt: l.resets_at || undefined })
+}
+// Yedek: eski biçim (seven_day: { utilization }) ya da başka yerdeki pencereler.
+if (rateLimits.length === 0) walk(data, [], 0)
+const seen = new Set()
+const unique = rateLimits.filter(w => (seen.has(w.kind) ? false : (seen.add(w.kind), true)))
+unique.sort((a, b) => ORDER(a.kind) - ORDER(b.kind))
+return JSON.stringify({ rateLimits: unique, shape: shapeOf(data, 0).slice(0, 600) })
+"""
+
+final class ClaudeLink: NSObject, NSWindowDelegate, WKNavigationDelegate {
+    static let shared = ClaudeLink()
+    static let connectedKey = "claudeAiConnected"
+    var isConnected: Bool { UserDefaults.standard.bool(forKey: ClaudeLink.connectedKey) }
+    var onChange: (() -> Void)?
+
+    private var window: NSWindow?
+    private var loginView: WKWebView?
+    private var loginTimer: Timer?
+    private var poller: WKWebView?
+    private var pollStarted = Date.distantPast
+
+    func start() {
+        let timer = Timer(timeInterval: 180, repeats: true) { [weak self] _ in self?.poll() }
+        RunLoop.main.add(timer, forMode: .common)
+        poll()
+    }
+
+    func openLogin() {
+        if let window = window {
+            window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return
+        }
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 720), configuration: config)
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                              backing: .buffered, defer: false)
+        window.title = L("claude.ai'ye giriş · Kullanım", "Sign in to claude.ai · Kullanım")
+        window.contentView = view
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+        self.window = window
+        loginView = view
+        view.load(URLRequest(url: URL(string: "https://claude.ai/login")!))
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.checkLogin() }
+        RunLoop.main.add(timer, forMode: .common)
+        loginTimer = timer
+    }
+
+    /// Giriş tamamlandı mı: claude.ai kuruluş listesini veriyorsa evet.
+    private func checkLogin() {
+        guard let view = loginView, view.url?.host == "claude.ai" else { return }
+        let js = "const r = await fetch('/api/organizations', { credentials: 'include' }); if (!r.ok) return 0; const j = await r.json(); return Array.isArray(j) ? j.length : 0"
+        view.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { [weak self] result in
+            if case .success(let value) = result, let count = value as? NSNumber, count.intValue > 0 { self?.loginSucceeded() }
+        }
+    }
+
+    private func loginSucceeded() {
+        guard loginTimer != nil else { return }
+        loginTimer?.invalidate(); loginTimer = nil
+        UserDefaults.standard.set(true, forKey: ClaudeLink.connectedKey)
+        window?.close()
+        poll()
+        onChange?()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        loginTimer?.invalidate(); loginTimer = nil
+        loginView = nil
+        window = nil
+    }
+
+    func disconnect() {
+        UserDefaults.standard.set(false, forKey: ClaudeLink.connectedKey)
+        let store = WKWebsiteDataStore.default()
+        let types = WKWebsiteDataStore.allWebsiteDataTypes()
+        store.fetchDataRecords(ofTypes: types) { records in
+            store.removeData(ofTypes: types, for: records.filter { $0.displayName.contains("claude") }) {}
+        }
+        onChange?()
+    }
+
+    /// Görünmez bir sayfada okur, kaydeder ve sayfayı kapatır (her 3 dakikada bir).
+    func poll() {
+        guard isConnected else { return }
+        if poller != nil, Date().timeIntervalSince(pollStarted) < 60 { return }
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: config)
+        view.navigationDelegate = self
+        poller = view
+        pollStarted = Date()
+        view.load(URLRequest(url: URL(string: "https://claude.ai/api/organizations")!))
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === poller else { return }
+        webView.callAsyncJavaScript(usageScript, arguments: [:], in: nil, in: .page) { [weak self] result in
+            switch result {
+            case .success(let value):
+                if let text = value as? String, let data = text.data(using: .utf8),
+                   let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                   let list = object["rateLimits"] as? [[String: Any]], saveReading(list, source: "claude.ai", note: object["shape"] as? String) {
+                    self?.onChange?()
+                } else {
+                    writeLog("claude.ai: okuma boş")
+                }
+            case .failure(let error):
+                let text = "\(error)"
+                writeLog("claude.ai: " + text)
+                if text.contains("-> 401") || text.contains("-> 403") {
+                    UserDefaults.standard.set(false, forKey: ClaudeLink.connectedKey)
+                    self?.onChange?()
+                }
+            }
+            self?.poller = nil
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if webView === poller { writeLog("claude.ai: \(error.localizedDescription)"); poller = nil }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if webView === poller { writeLog("claude.ai: \(error.localizedDescription)"); poller = nil }
+    }
+}
+
 // MARK: - Uygulama
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -235,6 +455,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(timer, forMode: .common)
+        ClaudeLink.shared.onChange = { [weak self] in self?.refresh() }
+        ClaudeLink.shared.start()
+        if CommandLine.arguments.contains("--connect") && !ClaudeLink.shared.isConnected { ClaudeLink.shared.openLogin() }
     }
 
     private func refresh() {
@@ -255,6 +478,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.view = PanelView(reading: loadReading())
         menu.addItem(panel)
         menu.addItem(.separator())
+        let link = ClaudeLink.shared.isConnected
+            ? NSMenuItem(title: L("claude.ai bağlantısını kes", "Disconnect claude.ai"), action: #selector(toggleClaudeLink), keyEquivalent: "")
+            : NSMenuItem(title: L("claude.ai'ye bağlan…", "Connect to claude.ai…"), action: #selector(toggleClaudeLink), keyEquivalent: "")
+        link.target = self
+        menu.addItem(link)
         let icons = NSMenuItem(title: L("Görünüm", "Appearance"), action: nil, keyEquivalent: "")
         let iconMenu = NSMenu()
         for icon in Icon.allCases {
@@ -285,6 +513,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             if service.status == .enabled { try service.unregister() } else { try service.register() }
         } catch { NSSound.beep() }
+    }
+
+    @objc private func toggleClaudeLink() {
+        if ClaudeLink.shared.isConnected { ClaudeLink.shared.disconnect() } else { ClaudeLink.shared.openLogin() }
     }
 
     @objc private func quitApp() { NSApp.terminate(nil) }
@@ -361,7 +593,6 @@ func nativeReply(_ object: [String: Any]) {
 
 func runNativeHost() {
     let input = FileHandle.standardInput
-    let logURL = dataURL.deletingLastPathComponent().appendingPathComponent("kullanim-tarayici.log")
     while true {
         let head = input.readData(ofLength: 4)
         guard head.count == 4 else { return }
@@ -369,26 +600,12 @@ func runNativeHost() {
         guard length > 0, length < 1_000_000 else { return }
         let body = input.readData(ofLength: Int(length))
         guard let message = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { nativeReply(["ok": false]); continue }
-        let stamp = ISO8601DateFormatter.string(from: Date(), timeZone: TimeZone(identifier: "UTC")!, formatOptions: [.withInternetDateTime, .withFractionalSeconds])
         if let error = message["error"] as? String {
-            try? (stamp + " " + String(error.prefix(700)) + "\n").write(to: logURL, atomically: true, encoding: .utf8)
+            writeLog("tarayıcı: " + error)
             nativeReply(["ok": true]); continue
         }
         let list = message["rateLimits"] as? [[String: Any]] ?? []
-        let clean: [[String: Any]] = list.compactMap { entry in
-            guard let kind = entry["kind"] as? String, kind.count < 40,
-                  let percent = (entry["percentUsed"] as? NSNumber)?.doubleValue, percent >= 0, percent <= 1000 else { return nil }
-            var row: [String: Any] = ["kind": kind, "percentUsed": percent]
-            if let reset = entry["resetsAt"] as? String, reset.count < 40 { row["resetsAt"] = reset }
-            return row
-        }
-        guard !clean.isEmpty,
-              let data = try? JSONSerialization.data(withJSONObject: ["updatedAt": stamp, "source": "browser", "rateLimits": clean], options: [.prettyPrinted])
-        else { nativeReply(["ok": false]); continue }
-        try? FileManager.default.createDirectory(at: dataURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: dataURL, options: .atomic)
-        let shape = (message["shape"] as? String).map { " | iskelet: " + String($0.prefix(600)) } ?? ""
-        try? (stamp + " tamam: " + clean.compactMap { $0["kind"] as? String }.joined(separator: ",") + shape + "\n").write(to: logURL, atomically: true, encoding: .utf8)
+        guard saveReading(list, source: "browser", note: message["shape"] as? String) else { nativeReply(["ok": false]); continue }
         nativeReply(["ok": true])
     }
 }

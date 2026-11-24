@@ -38,7 +38,21 @@ async function readUsage() {
       rateLimits.push({ kind, percentUsed: Math.round(u * 10) / 10, resetsAt: v.resets_at || v.resetsAt || undefined })
     }
   }
-  walk(data, [], 0)
+  // Asıl kaynak: "limits" listesi (haftalık toplam ve model bazlı sınırlar, ör. scope.model.display_name = "Fable").
+  for (const l of (Array.isArray(data.limits) ? data.limits : [])) {
+    if (!l || typeof l.percent !== 'number') continue
+    const g = String(l.group || l.kind || '').toLowerCase()
+    const base = g.includes('week') ? 'seven_day' : /session|five|hour/.test(g) ? 'five_hour' : null
+    if (!base) continue
+    const scope = l.scope || {}
+    const name = (scope.model && (scope.model.display_name || scope.model.id)) || (scope.surface && (scope.surface.display_name || scope.surface.id || (typeof scope.surface === 'string' ? scope.surface : '')))
+    let kind = base
+    if (name) kind = base + '_' + String(name).toLowerCase().replace(/[^a-z0-9]+/g, '_')
+    else if (String(l.kind || '').includes('scoped')) kind = base + '_scoped'
+    rateLimits.push({ kind, percentUsed: Math.round(l.percent * 10) / 10, resetsAt: l.resets_at || undefined })
+  }
+  // Yedek: eski biçim (seven_day: { utilization }) ya da başka yerdeki pencereler.
+  if (rateLimits.length === 0) walk(data, [], 0)
   const seen = new Set()
   const unique = rateLimits.filter(w => (seen.has(w.kind) ? false : (seen.add(w.kind), true)))
   unique.sort((a, b) => ORDER(a.kind) - ORDER(b.kind))
@@ -51,7 +65,7 @@ function shapeOf(node, depth) {
   if (typeof node !== 'object') return typeof node === 'number' ? 'n' : typeof node === 'string' ? 's' : typeof node
   if (depth > 3) return '…'
   if (Array.isArray(node)) return '[' + (node.length ? shapeOf(node[0], depth + 1) : '') + ']'
-  return '{' + Object.entries(node).map(([k, v]) => k + ':' + shapeOf(v, depth + 1)).join(',') + '}'
+  return '{' + Object.entries(node).filter(([, v]) => v !== null).map(([k, v]) => k + ':' + shapeOf(v, depth + 1)).join(',') + '}'
 }
 
 async function tick() {

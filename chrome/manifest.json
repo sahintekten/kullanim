@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kullanım göstergesi",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "claude.ai plan kullanım yüzdesini Mac'teki Kullanım göstergesine iletir. Yalnız yüzdeler gider; giriş bilgisi tarayıcıdan çıkmaz.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtMfArN06Doo1ZSmrbAwRLHNB4za8thMcFfvrzvvSX7GUigrE6QGME6Vd2T/U6kKzrU93eWdVfG5zo3Vmm9h7zex2N+XlLSJt1YLNfjM7zM1B5yJM3rNfyDmI2KQa8W7J6XfdfmP/bGINodzFet2FJZCHtMXQIHZqlbJUC6v7HYRWEp2m6WGmTmO5Y7+pBkXZ6qOWL297hv2XowzETCD+3ImjqHrtJx1BidYoYglekf6hkpFqVIfVr8s6Rl9vT4l1DQ6i6Mu3edpq2uKqPpCZcHNJ3326lhmaHRAoNx5k9VZPG6WbQAGpbxhEBJayALDoBb5QcHWrUZ9DHYbqgwMKUwIDAQAB",
   "permissions": ["nativeMessaging", "alarms"],

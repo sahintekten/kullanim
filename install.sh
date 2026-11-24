@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds Kullanım on this Mac, installs it to ~/Applications and connects it to Google Chrome.
+# Builds Kullanım on this Mac, installs it to ~/Applications and opens its claude.ai sign-in window.
 set -euo pipefail
 
 REPO="https://github.com/sahintekten/kullanim"
@@ -57,16 +57,13 @@ cat > "$HOSTS/local.kullanim.json" <<JSON
 JSON
 
 "$APP/Contents/MacOS/Kullanim" --login-on >/dev/null 2>&1 || true
-open "$APP"
+open "$APP" --args --connect
 
 echo
 echo "Done. The ring with a percentage is now in your menu bar."
 echo
-echo "One last step in Google Chrome (once):"
-echo "  1. Go to chrome://extensions"
-echo "  2. Turn on \"Developer mode\" (top right)"
-echo "  3. Click \"Load unpacked\" and choose this folder:"
-echo "     $EXT"
+echo "A window has opened: sign in to claude.ai there once. The reading then refreshes"
+echo "every 3 minutes, whichever browser you use. (You can also open it later:"
+echo "click the ring > Connect to claude.ai.)"
 echo
-echo "Stay signed in to claude.ai in Chrome; the reading refreshes every 3 minutes."
-open -R "$EXT" 2>/dev/null || true
+echo "Chrome users can use the extension instead of signing in: see the README."
